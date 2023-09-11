@@ -1,6 +1,8 @@
 use argh::FromArgs;
 use color_eyre::eyre;
 use eyre::eyre;
+use itertools::Itertools;
+use std::fmt::Write;
 use std::fs::File;
 use std::io::Read;
 use std::str::from_utf8;
@@ -20,6 +22,7 @@ struct HexReaderArgs {
 enum HexReaderSubcommands {
     PrettyPrint(PrettyPrintCommand),
     AddressRanges(AddrRangesCommand),
+    PrintRange(PrintRangeCommand),
 }
 
 #[derive(FromArgs, PartialEq, Debug)]
@@ -33,6 +36,27 @@ struct PrettyPrintCommand {}
     description = "Address ranges in hex file"
 )]
 struct AddrRangesCommand {}
+
+#[derive(FromArgs, PartialEq, Debug)]
+#[argh(
+    subcommand,
+    name = "print",
+    description = "Print bytes in the hex file"
+)]
+struct PrintRangeCommand {
+    #[argh(option, description = "offset to start printing from", default = "0")]
+    offset: u32,
+
+    #[argh(option, description = "number of bytes to print")]
+    len: Option<u32>,
+
+    #[argh(
+        option,
+        description = "number of bytes to cluster as one",
+        default = "4"
+    )]
+    cluster: usize,
+}
 
 fn main() -> eyre::Result<()> {
     color_eyre::install()?;
@@ -58,6 +82,28 @@ fn main() -> eyre::Result<()> {
                 );
             }
         }
+        HexReaderSubcommands::PrintRange(cmd) => {
+            let ranges = hex_file.address_ranges();
+            let mut rem_len = cmd.len;
+            for range in ranges {
+                if range.is_before(cmd.offset) {
+                    continue;
+                }
+
+                let start = cmd.offset.max(range.start);
+                let end = if let Some(rem) = rem_len {
+                    range.end.min(start + rem - 1)
+                } else {
+                    range.end
+                };
+
+                println!("\n\n[0x{:08x} - 0x{:08x}]", range.start, range.end);
+                hex_file.print_bytes(start, end, cmd.cluster);
+                println!();
+
+                rem_len = rem_len.map(|l| l - (end - start + 1));
+            }
+        }
     }
 
     Ok(())
@@ -75,7 +121,53 @@ struct AddrRange {
     end: u32,
 }
 
+impl AddrRange {
+    fn is_before(&self, addr: u32) -> bool {
+        self.start < addr && self.end < addr
+    }
+
+    fn contains(&self, addr: u32) -> bool {
+        self.start <= addr && self.end >= addr
+    }
+}
+
 impl HexFile {
+    fn print_bytes(&self, start: u32, end: u32, cluster: usize) {
+        let mut data = self
+            .data
+            .iter()
+            .find(|d| d.addr_range().contains(start))
+            .unwrap();
+
+        const CLUSTER_PER_LINE: usize = 4;
+        let mut cluster_cnt = 0;
+
+        for addrs in &(start..=end).chunks(cluster) {
+            let addrs = addrs.collect_vec();
+            let mut cluster = "".repeat((cluster - addrs.len()) * 2);
+            for &addr in addrs.iter().rev() {
+                if !data.addr_range().contains(addr) {
+                    data = self
+                        .data
+                        .iter()
+                        .find(|d| d.addr_range().contains(addr))
+                        .unwrap();
+                }
+                write!(&mut cluster, "{:02x}", data.get_byte(addr)).ok();
+            }
+
+            if cluster_cnt % CLUSTER_PER_LINE == 0 {
+                print!("\n{:08x}  ", addrs[0]);
+            }
+            cluster_cnt += 1;
+
+            print!("{} ", cluster);
+        }
+        if cluster_cnt % CLUSTER_PER_LINE == 0 {
+            println!();
+        }
+    }
+
     fn pretty_print(&self) {
         if let Some(start) = &self.start {
             println!(
@@ -292,6 +384,17 @@ impl Data {
                 print!(", ");
             }
         }
+    }
+
+    fn addr_range(&self) -> AddrRange {
+        AddrRange {
+            start: self.addr,
+            end: self.addr + self.data.len() as u32 - 1,
+        }
+    }
+
+    fn get_byte(&self, addr: u32) -> u8 {
+        self.data[(addr - self.addr) as usize]
     }
 }
 
