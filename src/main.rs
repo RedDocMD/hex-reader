@@ -12,14 +12,30 @@ fn main() -> eyre::Result<()> {
     let mut contents = Vec::new();
     file.read_to_end(&mut contents)?;
 
-    let mut ctx = Context::new(&contents);
-    let mut records = Vec::new();
-    while let Some(record) = ctx.next_record()? {
-        record.pretty_print();
-        records.push(record);
-    }
+    let hex_file = Context::new(&contents).into_hex_file()?;
+    hex_file.pretty_print();
 
     Ok(())
+}
+
+#[derive(Debug)]
+struct HexFile {
+    start: Option<StartSegmentAddr>,
+    data: Vec<Data>,
+}
+
+impl HexFile {
+    fn pretty_print(&self) {
+        if let Some(start) = &self.start {
+            println!(
+                "Start Addr: CS = 0x{:04x}, IP = 0x{:04x}\n",
+                start.cs, start.ip
+            );
+        }
+        for d in &self.data {
+            d.pretty_print();
+        }
+    }
 }
 
 struct Context<'a> {
@@ -41,6 +57,25 @@ impl<'a> Context<'a> {
 }
 
 impl Context<'_> {
+    fn into_hex_file(mut self) -> eyre::Result<HexFile> {
+        let mut start = None;
+        let mut data = Vec::new();
+
+        loop {
+            match self.next_record()? {
+                Some(Record::Eof) => break,
+                Some(Record::Data(d)) => data.push(d),
+                Some(Record::StartSegmentAddr(s)) => {
+                    start = Some(s);
+                }
+                _ => {}
+            }
+        }
+
+        data.sort_by(|l, r| l.addr.cmp(&r.addr));
+        Ok(HexFile { start, data })
+    }
+
     fn next_record(&mut self) -> eyre::Result<Option<Record>> {
         if self.eof {
             if self.has_next_line() {
@@ -49,6 +84,7 @@ impl Context<'_> {
                 return Ok(None);
             }
         }
+        let addr_hi = self.addr_hi;
         let Some((idx, line)) = self.next_line() else { return Err(eyre!("Unexpected EOF")); };
 
         if line.is_empty() {
@@ -100,10 +136,13 @@ impl Context<'_> {
                     ));
                 }
 
-                Ok(Some(Record::Data(Data {
-                    data,
-                    addr: addr as usize,
-                })))
+                let addr = if let Some(addr_hi) = addr_hi {
+                    ((addr_hi as u32) << 16) | addr as u32
+                } else {
+                    addr as u32
+                };
+
+                Ok(Some(Record::Data(Data { data, addr })))
             }
             0x01 => {
                 self.eof = true;
@@ -125,6 +164,17 @@ impl Context<'_> {
                     16,
                 )?;
                 Ok(Some(Record::StartSegmentAddr(StartSegmentAddr { cs, ip })))
+            }
+            0x04 => {
+                let addr_hi = u16::from_str_radix(
+                    from_utf8(
+                        line.get(9..=12)
+                            .ok_or_else(|| eyre!("Line {}: no addr_hi field", idx))?,
+                    )?,
+                    16,
+                )?;
+                self.addr_hi = Some(addr_hi);
+                Ok(None)
             }
             _ => Err(eyre!("Line {}: Unknown kind {:02X}", idx, kind)),
         }
@@ -160,32 +210,26 @@ enum Record {
 #[derive(Debug)]
 struct Data {
     data: Vec<u8>,
-    addr: usize,
+    addr: u32,
+}
+
+impl Data {
+    fn pretty_print(&self) {
+        print!("Addr: 0x{:08x}, ", self.addr);
+        print!("Data: [");
+        for (i, byte) in self.data.iter().enumerate() {
+            print!("{:02x}", byte);
+            if i == self.data.len() - 1 {
+                println!("]");
+            } else {
+                print!(", ");
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
 struct StartSegmentAddr {
     cs: u16,
     ip: u16,
-}
-
-impl Record {
-    fn pretty_print(&self) {
-        match self {
-            Record::Data(d) => {
-                print!("Addr: 0x{:08x}, ", d.addr);
-                print!("Data: [");
-                for (i, byte) in d.data.iter().enumerate() {
-                    print!("{:02x}", byte);
-                    if i == d.data.len() - 1 {
-                        println!("]");
-                    } else {
-                        print!(", ");
-                    }
-                }
-            }
-            Record::Eof => println!("EOF"),
-            Record::StartSegmentAddr(ssa) => println!("CS: 0x{:04x}, IP: 0x{:04x}", ssa.cs, ssa.ip),
-        }
-    }
 }
