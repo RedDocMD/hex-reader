@@ -43,11 +43,21 @@ struct AddrRangesCommand {}
     name = "print",
     description = "Print bytes in the hex file"
 )]
+
 struct PrintRangeCommand {
-    #[argh(option, description = "offset to start printing from", default = "0")]
+    #[argh(
+        option,
+        description = "offset to start printing from",
+        default = "0",
+        from_str_fn(num_decode)
+    )]
     offset: u32,
 
-    #[argh(option, description = "number of bytes to print")]
+    #[argh(
+        option,
+        description = "number of bytes to print",
+        from_str_fn(num_decode)
+    )]
     len: Option<u32>,
 
     #[argh(
@@ -56,6 +66,19 @@ struct PrintRangeCommand {
         default = "4"
     )]
     cluster: usize,
+}
+
+fn num_decode(s: &str) -> Result<u32, String> {
+    let (s, rad) = if let Some(s) = s.strip_prefix("0x") {
+        (s, 16)
+    } else if let Some(s) = s.strip_prefix("0b") {
+        (s, 2)
+    } else if let Some(s) = s.strip_prefix("0o") {
+        (s, 8)
+    } else {
+        (s, 10)
+    };
+    u32::from_str_radix(s, rad).map_err(|e| e.to_string())
 }
 
 fn main() -> eyre::Result<()> {
@@ -86,6 +109,9 @@ fn main() -> eyre::Result<()> {
             let ranges = hex_file.address_ranges();
             let mut rem_len = cmd.len;
             for range in ranges {
+                if let Some(0) = rem_len {
+                    break;
+                }
                 if range.is_before(cmd.offset) {
                     continue;
                 }
@@ -101,7 +127,7 @@ fn main() -> eyre::Result<()> {
                 hex_file.print_bytes(start, end, cmd.cluster);
                 println!();
 
-                rem_len = rem_len.map(|l| l - (end - start + 1));
+                rem_len = rem_len.map(|l| l - (end + 1 - start));
             }
         }
     }
