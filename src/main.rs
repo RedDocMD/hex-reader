@@ -2,7 +2,6 @@ use argh::FromArgs;
 use color_eyre::eyre;
 use eyre::eyre;
 use itertools::Itertools;
-use std::fmt::Write;
 use std::fs::File;
 use std::io::Read;
 use std::str::from_utf8;
@@ -23,6 +22,7 @@ enum HexReaderSubcommands {
     PrettyPrint(PrettyPrintCommand),
     AddressRanges(AddrRangesCommand),
     PrintRange(PrintRangeCommand),
+    Dump(DumpCommand),
 }
 
 #[derive(FromArgs, PartialEq, Debug)]
@@ -66,6 +66,28 @@ struct PrintRangeCommand {
         default = "4"
     )]
     cluster: usize,
+}
+
+#[derive(FromArgs, PartialEq, Debug)]
+#[argh(subcommand, name = "dump", description = "Dump bytes to a file")]
+struct DumpCommand {
+    #[argh(
+        option,
+        description = "offset to start printing from",
+        default = "0",
+        from_str_fn(num_decode)
+    )]
+    offset: u32,
+
+    #[argh(
+        option,
+        description = "number of bytes to print",
+        from_str_fn(num_decode)
+    )]
+    len: Option<u32>,
+
+    #[argh(positional)]
+    filename: String,
 }
 
 fn num_decode(s: &str) -> Result<u32, String> {
@@ -130,6 +152,46 @@ fn main() -> eyre::Result<()> {
                 rem_len = rem_len.map(|l| l - (end + 1 - start));
             }
         }
+        HexReaderSubcommands::Dump(cmd) => {
+            use std::io::Write;
+
+            let start = cmd.offset;
+            let ranges = hex_file.address_ranges();
+            let Some(range) = ranges.iter().find(|r| r.contains(start))
+                else { return Err(eyre!("0x{:08x} doesn't belong to any address range", start));};
+            let end = if let Some(len) = cmd.len {
+                let end = start + len - 1;
+                if end > range.end {
+                    return Err(eyre!(
+                        "Length {} is causing end to go out of address range [0x{:08x} - 0x{:08x}] at 0x{:08x}",
+                        len,
+                        range.start,
+                        range.end,
+                        end
+                    ));
+                }
+                end
+            } else {
+                range.end
+            };
+
+            let mut file = File::create(cmd.filename)?;
+            let mut buf = [0u8; 1];
+            let mut pos = hex_file
+                .data
+                .iter()
+                .position(|d| d.addr_range().contains(start))
+                .unwrap();
+            let mut data = &hex_file.data[pos];
+            for addr in start..=end {
+                if !data.addr_range().contains(addr) {
+                    pos += 1;
+                    data = &hex_file.data[pos];
+                }
+                buf[0] = data.get_byte(addr);
+                file.write_all(&buf)?;
+            }
+        }
     }
 
     Ok(())
@@ -159,6 +221,8 @@ impl AddrRange {
 
 impl HexFile {
     fn print_bytes(&self, start: u32, end: u32, cluster: usize) {
+        use std::fmt::Write;
+
         let mut data = self
             .data
             .iter()
