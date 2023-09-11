@@ -19,11 +19,20 @@ struct HexReaderArgs {
 #[argh(subcommand)]
 enum HexReaderSubcommands {
     PrettyPrint(PrettyPrintCommand),
+    AddressRanges(AddrRangesCommand),
 }
 
 #[derive(FromArgs, PartialEq, Debug)]
 #[argh(subcommand, name = "pp", description = "Pretty-print hex file")]
 struct PrettyPrintCommand {}
+
+#[derive(FromArgs, PartialEq, Debug)]
+#[argh(
+    subcommand,
+    name = "ranges",
+    description = "Address ranges in hex file"
+)]
+struct AddrRangesCommand {}
 
 fn main() -> eyre::Result<()> {
     color_eyre::install()?;
@@ -38,6 +47,17 @@ fn main() -> eyre::Result<()> {
 
     match args.sub {
         HexReaderSubcommands::PrettyPrint(_) => hex_file.pretty_print(),
+        HexReaderSubcommands::AddressRanges(_) => {
+            let ranges = hex_file.address_ranges();
+            println!("Address Ranges:");
+            for range in ranges {
+                let size = range.end - range.start + 1;
+                println!(
+                    "    0x{:08x}-0x{:08x} (Size = 0x{:x})",
+                    range.start, range.end, size
+                );
+            }
+        }
     }
 
     Ok(())
@@ -47,6 +67,12 @@ fn main() -> eyre::Result<()> {
 struct HexFile {
     start: Option<StartSegmentAddr>,
     data: Vec<Data>,
+}
+
+#[derive(Debug)]
+struct AddrRange {
+    start: u32,
+    end: u32,
 }
 
 impl HexFile {
@@ -60,6 +86,22 @@ impl HexFile {
         for d in &self.data {
             d.pretty_print();
         }
+    }
+
+    fn address_ranges(&self) -> Vec<AddrRange> {
+        let (first, rest) = self.data.split_first().unwrap();
+        let mut ranges = Vec::new();
+        let mut start = first.addr;
+        let mut end = first.addr + first.data.len() as u32 - 1;
+        for d in rest {
+            if d.addr != end + 1 {
+                ranges.push(AddrRange { start, end });
+                start = d.addr;
+            }
+            end = d.addr + d.data.len() as u32 - 1;
+        }
+        ranges.push(AddrRange { start, end });
+        ranges
     }
 }
 
