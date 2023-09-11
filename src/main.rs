@@ -1,19 +1,44 @@
+use argh::FromArgs;
 use color_eyre::eyre;
 use eyre::eyre;
 use std::fs::File;
 use std::io::Read;
 use std::str::from_utf8;
 
+#[derive(FromArgs, PartialEq, Debug)]
+#[argh(description = "Parses a .hex file")]
+struct HexReaderArgs {
+    #[argh(positional)]
+    filename: String,
+
+    #[argh(subcommand)]
+    sub: HexReaderSubcommands,
+}
+
+#[derive(FromArgs, PartialEq, Debug)]
+#[argh(subcommand)]
+enum HexReaderSubcommands {
+    PrettyPrint(PrettyPrintCommand),
+}
+
+#[derive(FromArgs, PartialEq, Debug)]
+#[argh(subcommand, name = "pp", description = "Pretty-print hex file")]
+struct PrettyPrintCommand {}
+
 fn main() -> eyre::Result<()> {
     color_eyre::install()?;
-    let args: Vec<_> = std::env::args().collect();
-    let filename = &args[1];
+    let args: HexReaderArgs = argh::from_env();
+
+    let filename = &args.filename;
     let mut file = File::open(filename)?;
     let mut contents = Vec::new();
     file.read_to_end(&mut contents)?;
 
     let hex_file = Context::new(&contents).into_hex_file()?;
-    hex_file.pretty_print();
+
+    match args.sub {
+        HexReaderSubcommands::PrettyPrint(_) => hex_file.pretty_print(),
+    }
 
     Ok(())
 }
