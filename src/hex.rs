@@ -1,7 +1,11 @@
-use color_eyre::eyre;
+use color_eyre::eyre::{self, Context as _};
 use eyre::eyre;
 use itertools::Itertools;
-use std::str::from_utf8;
+use object::{
+    write::{Object, StandardSegment},
+    Architecture, BinaryFormat, Endianness, SectionKind,
+};
+use std::{fs::File, io::BufWriter, str::from_utf8};
 
 #[derive(Debug)]
 pub struct HexFile {
@@ -9,7 +13,7 @@ pub struct HexFile {
     data: Vec<Data>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct AddrRange {
     pub start: u32,
     pub end: u32,
@@ -22,6 +26,28 @@ impl AddrRange {
 
     pub fn contains(&self, addr: u32) -> bool {
         self.start <= addr && self.end >= addr
+    }
+
+    pub fn contains_range(&self, range: AddrRange) -> bool {
+        self.start <= range.start && self.end >= range.end
+    }
+
+    pub fn split(&self, at: u32) -> (AddrRange, AddrRange) {
+        if at <= self.start || at >= self.end {
+            panic!(
+                "Cannot split at {} on range {}-{}",
+                at, self.start, self.end
+            );
+        }
+        let before = AddrRange {
+            start: self.start,
+            end: at - 1,
+        };
+        let after = AddrRange {
+            start: at,
+            end: self.end,
+        };
+        (before, after)
     }
 }
 
@@ -98,6 +124,103 @@ impl HexFile {
 
     pub fn data_at(&self, idx: usize) -> &Data {
         &self.data[idx]
+    }
+
+    fn data_in_range(&self, range: AddrRange) -> Vec<u8> {
+        let mut data = Vec::new();
+        for d in &self.data {
+            let curr_range = d.addr_range();
+            if range.contains_range(curr_range) {
+                data.extend_from_slice(&d.data);
+            }
+        }
+        data
+    }
+
+    fn range_to_elf(&self, ob: &mut Object<'_>, range: AddrRange) {
+        const FLASH_DATA_RANGE: AddrRange = AddrRange {
+            start: 0x0000_0000,
+            end: 0x0000_00BF,
+        };
+        const CODE_RANGE: AddrRange = AddrRange {
+            start: 0x0000_00C0,
+            end: 0x0003_FFFF,
+        };
+        const OPT_RANGE: AddrRange = AddrRange {
+            start: 0x0101_0008,
+            end: 0x0101_0033,
+        };
+        const SRAM_RANGE: AddrRange = AddrRange {
+            start: 0x4000_0000,
+            end: 0x400F_FFFF,
+        };
+
+        let (name, kind, segment) = if CODE_RANGE.contains_range(range) {
+            (
+                b".text".to_vec(),
+                SectionKind::Text,
+                ob.segment_name(StandardSegment::Text),
+            )
+        } else if OPT_RANGE.contains_range(range) {
+            (
+                b".opt_range".to_vec(),
+                SectionKind::Other,
+                ob.segment_name(StandardSegment::Debug),
+            )
+        } else if SRAM_RANGE.contains_range(range) {
+            (
+                b".data".to_vec(),
+                SectionKind::Data,
+                ob.segment_name(StandardSegment::Data),
+            )
+        } else if FLASH_DATA_RANGE.contains_range(range) || range.contains_range(FLASH_DATA_RANGE) {
+            (
+                b".vectors".to_vec(),
+                SectionKind::Other,
+                ob.segment_name(StandardSegment::Debug),
+            )
+        } else {
+            unreachable!("Invalid range: {:?}", range);
+        };
+
+        let range = if range.contains_range(FLASH_DATA_RANGE) {
+            FLASH_DATA_RANGE
+        } else {
+            range
+        };
+
+        let data = self.data_in_range(range);
+        let id = ob.add_section(segment.to_vec(), name, kind);
+        ob.set_section_data(id, data, 2);
+    }
+
+    fn start_addr(&self) -> Option<u32> {
+        self.start.map(|ss| ((ss.cs as u32) << 16) | (ss.ip as u32))
+    }
+
+    pub fn to_elf_file(&self, path: &str) -> eyre::Result<()> {
+        let mut ob = Object::new(BinaryFormat::Elf, Architecture::Arm, Endianness::Little);
+
+        let addr_ranges = self.address_ranges();
+        for range in addr_ranges {
+            if let Some(start_addr) = self.start_addr() {
+                let start_addr = start_addr & 0xFFFF_FFFE;
+                if range.contains(start_addr) {
+                    let (before, after) = range.split(start_addr);
+                    self.range_to_elf(&mut ob, before);
+                    self.range_to_elf(&mut ob, after);
+                } else {
+                    self.range_to_elf(&mut ob, range);
+                }
+            } else {
+                self.range_to_elf(&mut ob, range);
+            }
+        }
+
+        let file = File::create(path).with_context(|| format!("Opening {}", path))?;
+        let mut file_writer = BufWriter::new(file);
+        ob.write_stream(&mut file_writer).unwrap();
+        Ok(())
     }
 }
 
@@ -302,7 +425,7 @@ impl Data {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct StartSegmentAddr {
     cs: u16,
     ip: u16,

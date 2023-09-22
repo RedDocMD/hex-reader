@@ -24,10 +24,11 @@ enum HexReaderSubcommands {
     AddressRanges(AddrRangesCommand),
     PrintRange(PrintRangeCommand),
     Dump(DumpCommand),
+    ToElf(ToElfCommand),
 }
 
 #[derive(FromArgs, PartialEq, Debug)]
-#[argh(subcommand, name = "pp", description = "Pretty-print hex file")]
+#[argh(subcommand, name = "pretty", description = "Pretty-print hex file")]
 struct PrettyPrintCommand {}
 
 #[derive(FromArgs, PartialEq, Debug)]
@@ -37,6 +38,13 @@ struct PrettyPrintCommand {}
     description = "Address ranges in hex file"
 )]
 struct AddrRangesCommand {}
+
+#[derive(FromArgs, PartialEq, Debug)]
+#[argh(subcommand, name = "to-elf", description = "Convert hex file to ELF")]
+struct ToElfCommand {
+    #[argh(positional, description = "file to output ELF to")]
+    path: String,
+}
 
 #[derive(FromArgs, PartialEq, Debug)]
 #[argh(
@@ -192,6 +200,9 @@ fn main() -> eyre::Result<()> {
                 buf[0] = data.get_byte(addr);
                 file.write_all(&buf)?;
             }
+        }
+        HexReaderSubcommands::ToElf(cmd) => {
+            hex_file.to_elf_file(&cmd.path)?;
         }
     }
 
