@@ -31,27 +31,29 @@ enum SectionKind {
     Code,
     Opt,
     Sram,
+    StrTab,
 }
 
 #[derive(Debug)]
 struct SectionData {
     range: AddrRange,
     kind: SectionKind,
+    name: Vec<u8>,
 }
 
 fn range_to_section(range: AddrRange) -> SectionData {
-    let kind = if FLASH_DATA_RANGE.contains_range(range) {
-        SectionKind::Flash
+    let (kind, name) = if FLASH_DATA_RANGE.contains_range(range) {
+        (SectionKind::Flash, b".flash".to_vec())
     } else if CODE_RANGE.contains_range(range) {
-        SectionKind::Code
+        (SectionKind::Code, b".text".to_vec())
     } else if OPT_RANGE.contains_range(range) {
-        SectionKind::Opt
+        (SectionKind::Opt, b".opt".to_vec())
     } else if SRAM_RANGE.contains_range(range) {
-        SectionKind::Sram
+        (SectionKind::Sram, b".data".to_vec())
     } else {
         unreachable!("Invalid range: {:?}", range);
     };
-    SectionData { range, kind }
+    SectionData { range, kind, name }
 }
 
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
@@ -85,6 +87,34 @@ struct ElfHeader {
     sh_ent_size: u16,
     sh_num: u16,
     sh_str_idx: u16,
+}
+
+#[derive(Debug, Default)]
+#[repr(C)]
+struct ProgramHeader {
+    r#type: u32,
+    offset: u32,
+    virt_addr: u32,
+    phy_addr: u32,
+    file_size: u32,
+    mem_size: u32,
+    flags: u32,
+    align: u32,
+}
+
+#[derive(Debug, Default)]
+#[repr(C)]
+struct SectionHeader {
+    name: u32,
+    r#type: u32,
+    flags: u32,
+    addr: u32,
+    offset: u32,
+    size: u32,
+    link: u32,
+    info: u32,
+    align: u32,
+    ent_size: u32,
 }
 
 pub fn to_elf_file(hex: &HexFile, path: &str) -> eyre::Result<()> {
@@ -132,61 +162,66 @@ pub fn to_elf_file(hex: &HexFile, path: &str) -> eyre::Result<()> {
         section_offsets.push(off);
     }
 
+    // Create name section
+    sections.push(SectionData {
+        range: AddrRange { start: 0, end: 0 },
+        kind: SectionKind::StrTab,
+        name: b".shstrtab".to_vec(),
+    });
+
+    let start_off = elf_data.len();
+    section_offsets.push(elf_data.len());
+    elf_data.push(0); // Initial null
+
+    let mut name_section_len = 1;
+    let mut section_names = Vec::new();
+    for section in &sections {
+        section_names.push(elf_data.len() - start_off);
+        elf_data.extend_from_slice(&section.name);
+        elf_data.push(0); // Null terminator
+        name_section_len += section.name.len() + 1;
+    }
+
+    hdr.sh_str_idx = sections.len() as u16 - 1;
+    sections.last_mut().unwrap().range.end = name_section_len as u32 - 1;
+
+    // Fill up section headers
+    hdr.sh_ent_size = mem::size_of::<SectionHeader>() as u16;
+    hdr.sh_off = elf_data.len() as u32;
+    hdr.sh_num = sections.len() as u16;
+    for (i, section) in sections.iter().enumerate() {
+        let sec_hdr = SectionHeader {
+            name: section_names[i] as u32,
+            r#type: if matches!(section.kind, SectionKind::StrTab) {
+                elf::SHT_STRTAB
+            } else {
+                elf::SHT_PROGBITS
+            },
+            flags: match section.kind {
+                SectionKind::Flash => elf::SHF_ALLOC,
+                SectionKind::Code => elf::SHF_ALLOC | elf::SHF_EXECINSTR,
+                SectionKind::Opt => elf::SHF_ALLOC,
+                SectionKind::Sram => elf::SHF_ALLOC | elf::SHF_WRITE,
+                SectionKind::StrTab => 0,
+            },
+            addr: if matches!(section.kind, SectionKind::StrTab) {
+                0
+            } else {
+                section.range.start
+            },
+            offset: section_offsets[i] as u32,
+            size: section.range.size(),
+            ..Default::default()
+        };
+        let sec_hdr_slice = ob_to_slice(&sec_hdr);
+        elf_data.extend_from_slice(sec_hdr_slice);
+    }
+
     let hdr_slice = ob_to_slice(&hdr);
     elf_data[..hdr_slice.len()].copy_from_slice(hdr_slice);
 
     let mut file = File::create(path).with_context(|| format!("Opening {}", path))?;
     file.write_all(&elf_data)?;
-
-    // let mut ob = Object::new(BinaryFormat::Elf, Architecture::Arm, Endianness::Little);
-    // for sec in &sections {
-    //     let data = self.data_in_range(sec.range);
-    //     match sec.kind {
-    //         SectionKind::Flash => {
-    //             ob.add_subsection(StandardSection::ReadOnlyData, b"vector", &data, 1);
-    //         }
-    //         SectionKind::Code => {
-    //             ob.add_subsection(StandardSection::Text, b"bootloader", &data, 1);
-    //         }
-    //         SectionKind::Opt => {
-    //             ob.add_subsection(StandardSection::ReadOnlyDataWithRel, b"opt", &data, 1);
-    //         }
-    //         SectionKind::Sram => {
-    //             ob.add_subsection(StandardSection::Data, b".sram", &data, 1);
-    //         }
-    //     }
-    // }
-
-    // let elf_data = ob.write()?;
-    // let in_elf = FileHeader32::<LittleEndian>::parse(elf_data.as_slice())?;
-    // let endian = in_elf.endian()?;
-
-    // let mut out_elf = Vec::new();
-    // let mut wtr = object::write::elf::Writer::new(Endianness::Little, false, &mut out_elf);
-
-    // wtr.reserve_file_header();
-    // wtr.write_file_header(&object::write::elf::FileHeader {
-    //     os_abi: in_elf.e_ident().os_abi,
-    //     abi_version: 0,
-    //     e_type: in_elf.e_type(endian),
-    //     e_machine: in_elf.e_machine(endian),
-    //     e_entry: entry_point as u64,
-    //     e_flags: in_elf.e_flags(endian),
-    // })
-    // .unwrap();
-
-    // wtr.reserve_program_headers(4);
-    // wtr.write_align_program_headers();
-    // wtr.write_program_header(&object::write::elf::ProgramHeader {
-    //     p_type: elf::PT_LOAD,
-    //     p_flags: elf::PF_X | elf::PF_R,
-    //     p_offset: 0x0,
-    //     p_vaddr: 0x0,
-    //     p_paddr: 0x0,
-    //     p_filesz: 0x10,
-    //     p_memsz: 0x10,
-    //     p_align: 1,
-    // });
 
     Ok(())
 }

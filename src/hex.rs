@@ -45,6 +45,10 @@ impl AddrRange {
         };
         (before, after)
     }
+
+    pub fn size(&self) -> u32 {
+        self.end - self.start + 1
+    }
 }
 
 impl HexFile {
