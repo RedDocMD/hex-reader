@@ -1,3 +1,4 @@
+mod elf;
 mod hex;
 
 use argh::FromArgs;
@@ -202,7 +203,7 @@ fn main() -> eyre::Result<()> {
             }
         }
         HexReaderSubcommands::ToElf(cmd) => {
-            hex_file.to_elf_file(&cmd.path)?;
+            elf::to_elf_file(&hex_file, &cmd.path)?;
         }
     }
 

@@ -1,13 +1,7 @@
-use color_eyre::eyre::{self, Context as _};
+use color_eyre::eyre;
 use eyre::eyre;
 use itertools::Itertools;
-use object::{
-    elf::{self, FileHeader32},
-    read::elf::FileHeader as _,
-    write::{Object, StandardSection},
-    Architecture, BinaryFormat, Endianness, LittleEndian, Object as _,
-};
-use std::{fs::File, io::Write, str::from_utf8};
+use std::str::from_utf8;
 
 #[derive(Debug)]
 pub struct HexFile {
@@ -128,7 +122,7 @@ impl HexFile {
         &self.data[idx]
     }
 
-    fn data_in_range(&self, range: AddrRange) -> Vec<u8> {
+    pub fn data_in_range(&self, range: AddrRange) -> Vec<u8> {
         let mut data = Vec::new();
         for d in &self.data {
             let curr_range = d.addr_range();
@@ -139,112 +133,8 @@ impl HexFile {
         data
     }
 
-    fn start_addr(&self) -> Option<u32> {
+    pub fn start_addr(&self) -> Option<u32> {
         self.start.map(|ss| ((ss.cs as u32) << 16) | (ss.ip as u32))
-    }
-
-    pub fn to_elf_file(&self, path: &str) -> eyre::Result<()> {
-        fn add_section(range: AddrRange, sections: &mut Vec<SectionData>) {
-            let kind = if FLASH_DATA_RANGE.contains_range(range) {
-                SectionKind::Flash
-            } else if CODE_RANGE.contains_range(range) {
-                SectionKind::Code
-            } else if OPT_RANGE.contains_range(range) {
-                SectionKind::Opt
-            } else if SRAM_RANGE.contains_range(range) {
-                SectionKind::Sram
-            } else {
-                unreachable!("Invalid range: {:?}", range);
-            };
-            sections.push(SectionData { range, kind });
-        }
-
-        const FLASH_DATA_RANGE: AddrRange = AddrRange {
-            start: 0x0000_0000,
-            end: 0x0000_00BF,
-        };
-        const CODE_RANGE: AddrRange = AddrRange {
-            start: 0x0000_00C0,
-            end: 0x0003_FFFF,
-        };
-        const OPT_RANGE: AddrRange = AddrRange {
-            start: 0x0101_0008,
-            end: 0x0101_0033,
-        };
-        const SRAM_RANGE: AddrRange = AddrRange {
-            start: 0x4000_0000,
-            end: 0x400F_FFFF,
-        };
-
-        #[derive(Debug, Clone, Copy)]
-        enum SectionKind {
-            Flash,
-            Code,
-            Opt,
-            Sram,
-        }
-
-        #[derive(Debug)]
-        struct SectionData {
-            range: AddrRange,
-            kind: SectionKind,
-        }
-
-        const VECTOR_TABLE_END: u32 = 0xC0;
-        let addr_ranges = self.address_ranges();
-        let mut sections = Vec::new();
-        for range in addr_ranges {
-            if range.contains(VECTOR_TABLE_END) {
-                let (before, after) = range.split(VECTOR_TABLE_END);
-                add_section(before, &mut sections);
-                add_section(after, &mut sections);
-            } else {
-                add_section(range, &mut sections);
-            }
-        }
-
-        let mut ob = Object::new(BinaryFormat::Elf, Architecture::Arm, Endianness::Little);
-        for sec in &sections {
-            let data = self.data_in_range(sec.range);
-            match sec.kind {
-                SectionKind::Flash => {
-                    ob.add_subsection(StandardSection::ReadOnlyData, b"vector", &data, 1);
-                }
-                SectionKind::Code => {
-                    ob.add_subsection(StandardSection::Text, b"bootloader", &data, 1);
-                }
-                SectionKind::Opt => {
-                    ob.add_subsection(StandardSection::ReadOnlyDataWithRel, b"opt", &data, 1);
-                }
-                SectionKind::Sram => {
-                    ob.add_subsection(StandardSection::Data, b".sram", &data, 1);
-                }
-            }
-        }
-
-        let elf_data = ob.write()?;
-        let in_elf = FileHeader32::<LittleEndian>::parse(elf_data.as_slice())?;
-        let endian = in_elf.endian()?;
-
-        let mut out_elf = Vec::new();
-        let mut wtr = object::write::elf::Writer::new(Endianness::Little, false, &mut out_elf);
-
-        let entry_point = self.start_addr().unwrap_or(0) & 0xFFFF_FFFE;
-
-        wtr.reserve_file_header();
-        wtr.write_file_header(&object::write::elf::FileHeader {
-            os_abi: in_elf.e_ident().os_abi,
-            abi_version: 0,
-            e_type: in_elf.e_type(endian),
-            e_machine: in_elf.e_machine(endian),
-            e_entry: entry_point as u64,
-            e_flags: in_elf.e_flags(endian),
-        })
-        .unwrap();
-
-        let mut file = File::create(path).with_context(|| format!("Opening {}", path))?;
-        file.write_all(&out_elf)?;
-        Ok(())
     }
 }
 
