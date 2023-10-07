@@ -26,7 +26,16 @@ enum HexReaderSubcommands {
     PrintRange(PrintRangeCommand),
     Dump(DumpCommand),
     ToElf(ToElfCommand),
+    Entry(EntryCommand),
 }
+
+#[derive(FromArgs, PartialEq, Debug)]
+#[argh(
+    subcommand,
+    name = "entry",
+    description = "Print entry point of hex file"
+)]
+struct EntryCommand {}
 
 #[derive(FromArgs, PartialEq, Debug)]
 #[argh(subcommand, name = "pretty", description = "Pretty-print hex file")]
@@ -204,6 +213,13 @@ fn main() -> eyre::Result<()> {
         }
         HexReaderSubcommands::ToElf(cmd) => {
             elf::to_elf_file(&hex_file, &cmd.path)?;
+        }
+        HexReaderSubcommands::Entry(_) => {
+            if let Some(start) = hex_file.start_addr() {
+                println!("0x{:08X}", start);
+            } else {
+                println!("No entry point");
+            }
         }
     }
 
