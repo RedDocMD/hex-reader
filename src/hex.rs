@@ -1,7 +1,7 @@
 use color_eyre::eyre;
 use eyre::eyre;
 use itertools::Itertools;
-use std::str::from_utf8;
+use std::{fmt, io, str::from_utf8};
 
 #[derive(Debug)]
 pub struct HexFile {
@@ -28,6 +28,10 @@ impl AddrRange {
         self.start <= range.start && self.end >= range.end
     }
 
+    pub fn overlaps_range(&self, range: AddrRange) -> bool {
+        self.contains(range.start) || self.contains(range.end)
+    }
+
     pub fn split(&self, at: u32) -> (AddrRange, AddrRange) {
         if at <= self.start || at >= self.end {
             panic!(
@@ -48,6 +52,28 @@ impl AddrRange {
 
     pub fn size(&self) -> u32 {
         self.end - self.start + 1
+    }
+
+    pub fn transpose(&self, dest: u32) -> Self {
+        if dest >= self.start {
+            let diff = dest - self.start;
+            Self {
+                start: dest,
+                end: self.end + diff,
+            }
+        } else {
+            let diff = self.start - dest;
+            Self {
+                start: dest,
+                end: self.end - diff,
+            }
+        }
+    }
+}
+
+impl fmt::Display for AddrRange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "0x{:08X}-0x{:08X}", self.start, self.end)
     }
 }
 
@@ -139,6 +165,28 @@ impl HexFile {
 
     pub fn start_addr(&self) -> Option<u32> {
         self.start.map(|ss| ((ss.cs as u32) << 16) | (ss.ip as u32))
+    }
+
+    pub fn transpose(&mut self, start: u32, dest: u32) -> eyre::Result<()> {
+        let ranges = self.address_ranges();
+        let src_range = ranges
+            .iter()
+            .find(|x| x.start == start)
+            .ok_or(eyre!("0x{:08X} doesn't start any range", start))?;
+        let dest_range = src_range.transpose(dest);
+        if let Some(overlap_range) = ranges.iter().find(|x| x.overlaps_range(dest_range)) {
+            return Err(eyre!(
+                "Destination range {} overlaps with existing range {}",
+                dest_range,
+                overlap_range
+            ));
+        }
+        for data in &mut self.data {
+            if src_range.contains(data.addr) {
+                data.transpose(dest);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -340,6 +388,10 @@ impl Data {
 
     pub fn get_byte(&self, addr: u32) -> u8 {
         self.data[(addr - self.addr) as usize]
+    }
+
+    pub fn transpose(&mut self, dest: u32) {
+        self.addr = dest;
     }
 }
 

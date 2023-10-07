@@ -27,6 +27,7 @@ enum HexReaderSubcommands {
     Dump(DumpCommand),
     ToElf(ToElfCommand),
     Entry(EntryCommand),
+    Transpose(TransposeCommand),
 }
 
 #[derive(FromArgs, PartialEq, Debug)]
@@ -109,6 +110,23 @@ struct DumpCommand {
     filename: String,
 }
 
+#[derive(FromArgs, PartialEq, Debug)]
+#[argh(
+    subcommand,
+    name = "transpose",
+    description = "Transpose an address range to another address"
+)]
+struct TransposeCommand {
+    #[argh(positional, description = "start of address range to transpose")]
+    start: u32,
+
+    #[argh(positional, description = "address to transpose to")]
+    dest: u32,
+
+    #[argh(positional, description = "filename to write to")]
+    filename: String,
+}
+
 fn num_decode(s: &str) -> Result<u32, String> {
     let (s, rad) = if let Some(s) = s.strip_prefix("0x") {
         (s, 16)
@@ -131,7 +149,7 @@ fn main() -> eyre::Result<()> {
     let mut contents = Vec::new();
     file.read_to_end(&mut contents)?;
 
-    let hex_file = hex::Context::new(&contents).into_hex_file()?;
+    let mut hex_file = hex::Context::new(&contents).into_hex_file()?;
 
     match args.sub {
         HexReaderSubcommands::PrettyPrint(_) => hex_file.pretty_print(),
@@ -220,6 +238,9 @@ fn main() -> eyre::Result<()> {
             } else {
                 println!("No entry point");
             }
+        }
+        HexReaderSubcommands::Transpose(cmd) => {
+            hex_file.transpose(cmd.start, cmd.dest)?;
         }
     }
 
