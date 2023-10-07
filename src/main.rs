@@ -2,7 +2,7 @@ mod elf;
 mod hex;
 
 use argh::FromArgs;
-use color_eyre::eyre;
+use color_eyre::eyre::{self, Context};
 use eyre::eyre;
 
 use std::fs::File;
@@ -117,10 +117,18 @@ struct DumpCommand {
     description = "Transpose an address range to another address"
 )]
 struct TransposeCommand {
-    #[argh(positional, description = "start of address range to transpose")]
+    #[argh(
+        positional,
+        description = "start of address range to transpose",
+        from_str_fn(num_decode)
+    )]
     start: u32,
 
-    #[argh(positional, description = "address to transpose to")]
+    #[argh(
+        positional,
+        description = "address to transpose to",
+        from_str_fn(num_decode)
+    )]
     dest: u32,
 
     #[argh(positional, description = "filename to write to")]
@@ -241,6 +249,9 @@ fn main() -> eyre::Result<()> {
         }
         HexReaderSubcommands::Transpose(cmd) => {
             hex_file.transpose(cmd.start, cmd.dest)?;
+            let mut file = File::create(&cmd.filename)
+                .with_context(|| format!("Creating file {}", cmd.filename))?;
+            hex_file.write(&mut file)?;
         }
     }
 

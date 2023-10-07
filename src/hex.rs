@@ -1,7 +1,7 @@
 use color_eyre::eyre;
 use eyre::eyre;
 use itertools::Itertools;
-use std::{fmt, io, str::from_utf8};
+use std::{fmt, io, ops::Not, str::from_utf8};
 
 #[derive(Debug)]
 pub struct HexFile {
@@ -9,7 +9,7 @@ pub struct HexFile {
     data: Vec<Data>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AddrRange {
     pub start: u32,
     pub end: u32,
@@ -174,7 +174,10 @@ impl HexFile {
             .find(|x| x.start == start)
             .ok_or(eyre!("0x{:08X} doesn't start any range", start))?;
         let dest_range = src_range.transpose(dest);
-        if let Some(overlap_range) = ranges.iter().find(|x| x.overlaps_range(dest_range)) {
+        if let Some(overlap_range) = ranges
+            .iter()
+            .find(|x| x != &src_range && x.overlaps_range(dest_range))
+        {
             return Err(eyre!(
                 "Destination range {} overlaps with existing range {}",
                 dest_range,
@@ -183,9 +186,61 @@ impl HexFile {
         }
         for data in &mut self.data {
             if src_range.contains(data.addr) {
-                data.transpose(dest);
+                if dest >= start {
+                    let diff = dest - start;
+                    data.addr += diff;
+                } else {
+                    let diff = start - dest;
+                    data.addr -= diff;
+                }
             }
         }
+        Ok(())
+    }
+
+    pub fn write<W: io::Write>(&self, mut w: W) -> eyre::Result<()> {
+        let mut hi_addr = 0u16;
+        for data in &self.data {
+            let curr_hi_addr = ((0xFFFF0000 & data.addr) >> 16) as u16;
+            if curr_hi_addr != hi_addr {
+                hi_addr = curr_hi_addr;
+                let bytes = hi_addr.to_be_bytes();
+                let cksum = bytes[0]
+                    .wrapping_add(bytes[1])
+                    .wrapping_add(0x06)
+                    .not()
+                    .wrapping_add(0x01);
+                writeln!(w, ":02000004{:04X}{:02X}", hi_addr, cksum)?;
+            }
+
+            let curr_lo_addr = (0xFFFF & data.addr) as u16;
+            let len = data.data.len() as u8;
+            write!(w, ":{:02X}{:04X}00", len, curr_lo_addr)?;
+
+            let addr_bytes = curr_lo_addr.to_be_bytes();
+            let mut cksum = len.wrapping_add(addr_bytes[0]).wrapping_add(addr_bytes[1]);
+            for &b in &data.data {
+                write!(w, "{:02X}", b)?;
+                cksum = cksum.wrapping_add(b);
+            }
+            cksum = cksum.not().wrapping_add(0x01);
+            writeln!(w, "{:02X}", cksum)?;
+        }
+
+        if let Some(start) = self.start {
+            let cs_bytes = start.cs.to_be_bytes();
+            let ip_bytes = start.ip.to_be_bytes();
+            let cksum = cs_bytes[0]
+                .wrapping_add(cs_bytes[1])
+                .wrapping_add(ip_bytes[0])
+                .wrapping_add(ip_bytes[1])
+                .wrapping_add(0x07)
+                .not()
+                .wrapping_add(0x01);
+            writeln!(w, ":04000003{:04X}{:04X}{:02X}", start.cs, start.ip, cksum)?;
+        }
+
+        writeln!(w, ":00000001FF")?;
         Ok(())
     }
 }
@@ -388,10 +443,6 @@ impl Data {
 
     pub fn get_byte(&self, addr: u32) -> u8 {
         self.data[(addr - self.addr) as usize]
-    }
-
-    pub fn transpose(&mut self, dest: u32) {
-        self.addr = dest;
     }
 }
 
